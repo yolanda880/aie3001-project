@@ -1,0 +1,348 @@
+import { useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { audioEngine } from '../audio/engine'
+import { useStore } from '../store'
+import { midiToTimeline, timelineToMidi, type SpeedMap } from '../midi/speedMap'
+import type { SettingsKeyframe } from '../midi/settingsKeyframes'
+
+/**
+ * Timeline "pins" strip — modelled on `SpeedAutomationLane`, but a
+ * thin VALUE-LESS marker track: each pin is a whole settings
+ * snapshot, so there's no y-axis curve to draw — just diamond
+ * markers at each pin's time. Sits as a fixed-height strip directly
+ * under the ruler so it reads as part of the time scale rather than
+ * a track.
+ *
+ * Coordinate note: a pin's `time` is **TL_audio** (the SeekBar /
+ * `currentSongTime()` axis — "this point in the rendered video"),
+ * whereas the timeline editor's x-axis is **display-time**
+ * (natural-MIDI-time + offset, un-stretched by the speed curve).
+ * We bridge the two exactly like `RulerCanvas` / `seekToTime` do:
+ *
+ *   display → audio:  audio = midiOffset + midiToTimeline(map, display − midiOffset)
+ *   audio → display:  display = midiOffset + timelineToMidi(map, audio − midiOffset)
+ *
+ * so a pin dragged to a ruler tick lands on the elapsed-time that
+ * tick represents, and vice-versa.
+ */
+
+// Fixed strip height — independent of the per-lane ratio settings
+// (those store keys are frozen). Tall enough for a comfortable
+// diamond hit target plus the "pins" label.
+export const PIN_LANE_HEIGHT = 16
+
+/** Pin TL_audio time → editor display-time. */
+function audioToDisplay(
+  audioT: number,
+  speedMap: SpeedMap,
+  midiOffsetSec: number,
+): number {
+  return midiOffsetSec + timelineToMidi(speedMap, audioT - midiOffsetSec)
+}
+/** Editor display-time → pin TL_audio time. */
+function displayToAudio(
+  displayT: number,
+  speedMap: SpeedMap,
+  midiOffsetSec: number,
+): number {
+  return midiOffsetSec + midiToTimeline(speedMap, displayT - midiOffsetSec)
+}
+
+/** Seek the transport playhead to a TL_audio time (same call the
+ *  SeekBar / ruler use — engine.seek + store.setCurrentTime). */
+function seekAudio(audioT: number): void {
+  const t = Math.max(0, audioT)
+  audioEngine.seek(t)
+  useStore.getState().setCurrentTime(t)
+}
+
+function fmtTime(sec: number): string {
+  const s = Math.max(0, sec)
+  const m = Math.floor(s / 60)
+  const r = s - m * 60
+  return `${m}:${r.toFixed(2).padStart(5, '0')}`
+}
+
+export function SettingsPinLane({
+  keyframes,
+  editingTime,
+  speedMap,
+  laneHeight,
+  pxPerSec,
+  clampedScroll,
+  viewDuration,
+  midiOffsetSec,
+  totalDuration,
+}: {
+  keyframes: readonly SettingsKeyframe[]
+  editingTime: number | null
+  speedMap: SpeedMap
+  laneHeight: number
+  pxPerSec: number
+  /** display-time → px (timeline editor x-axis is display-time). */
+  clampedScroll: number
+  viewDuration: number
+  midiOffsetSec: number
+  totalDuration: number
+}) {
+  const { t } = useTranslation('timeline')
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+
+  // Drag a pin: bracket the whole gesture with begin/endSettingsEdit
+  // so it collapses to one undo entry (same model as the speed lane's
+  // breakpoint drag), and call moveKeyframe per move. We track the
+  // pin by its LIVE time (which moveKeyframe rewrites) so re-sorting
+  // inside the store doesn't strand the drag. `keyframes` is sorted
+  // by time ascending; we snapshot the neighbour times at drag start
+  // and clamp between them so the dragged pin can't cross a
+  // neighbour — that keeps the React key (index) stable through the
+  // gesture, so the element isn't remounted (which would drop
+  // pointer capture mid-drag), exactly like SpeedAutomationLane.
+  const dragRef = useRef<{
+    currentTime: number
+    prevTime: number
+    nextTime: number
+  } | null>(null)
+
+  const visEnd = clampedScroll + viewDuration
+
+  const onPinPointerDown =
+    (index: number) => (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return
+      e.stopPropagation()
+      const kf = keyframes[index]
+      if (!kf) return
+      // Select + seek immediately so the viewport / Inspector jump to
+      // this pin's look even if the user only clicks (no drag).
+      useStore.getState().selectKeyframe(kf.time)
+      seekAudio(kf.time)
+      const prev = index > 0 ? keyframes[index - 1].time : 0
+      const next =
+        index < keyframes.length - 1
+          ? keyframes[index + 1].time
+          : Number.POSITIVE_INFINITY
+      dragRef.current = {
+        currentTime: kf.time,
+        prevTime: prev,
+        nextTime: next,
+      }
+      e.currentTarget.setPointerCapture(e.pointerId)
+      useStore.getState().beginSettingsEdit()
+    }
+  const onPinPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current
+    if (!d) return
+    // Missed pointerup (capture sometimes drops it when released off-
+    // element) — buttons===0 means the button is already up.
+    if ((e.buttons & 1) === 0) {
+      onPinPointerUp(e)
+      return
+    }
+    const wrap = wrapRef.current
+    if (!wrap) return
+    e.stopPropagation()
+    const rect = wrap.getBoundingClientRect()
+    const localX = e.clientX - rect.left
+    const displayT = Math.max(0, clampedScroll + localX / pxPerSec)
+    const cappedDisplay =
+      totalDuration > 0 ? Math.min(totalDuration, displayT) : displayT
+    let nextAudio = Math.max(
+      0,
+      displayToAudio(cappedDisplay, speedMap, midiOffsetSec),
+    )
+    // Keep time order so the index (React key) stays valid. Touching
+    // a neighbour is allowed; crossing it is not.
+    nextAudio = Math.max(d.prevTime, Math.min(d.nextTime, nextAudio))
+    if (Math.abs(nextAudio - d.currentTime) < 1e-9) return
+    useStore.getState().moveKeyframe(d.currentTime, nextAudio)
+    d.currentTime = nextAudio
+    // Keep the playhead glued to the dragged pin so the viewport
+    // previews the pin's look at its new spot.
+    seekAudio(nextAudio)
+  }
+  const onPinPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return
+    e.stopPropagation()
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {
+      /* capture may already be released — ignore */
+    }
+    dragRef.current = null
+    useStore.getState().endSettingsEdit()
+  }
+  // Right-drag eraser: delete every pin the cursor sweeps over, like
+  // the falling-note editor's right-drag eraser. The whole gesture is
+  // bracketed with begin/endSettingsEdit so all the deletions collapse
+  // to ONE undo entry (the begin/end refcount nests with the per-call
+  // begin/end inside `removeKeyframe`). A plain right-click is just a
+  // zero-length sweep, so it still deletes the pin under the cursor.
+  const eraseRef = useRef<{ lastX: number } | null>(null)
+  const [erasing, setErasing] = useState(false)
+
+  // Half-width (px) of the sweep hit-band around the cursor x. ~ the
+  // 12 px marker box, so a pin under the pointer is reliably caught.
+  const ERASE_HIT_PX = 8
+
+  const localXFromEvent = (e: React.PointerEvent): number | null => {
+    const wrap = wrapRef.current
+    if (!wrap) return null
+    return e.clientX - wrap.getBoundingClientRect().left
+  }
+
+  // Delete every visible pin whose marker x falls in the swept band
+  // [fromX, toX] (± hit radius). Sweeping the *interval* between the
+  // previous and current cursor x — not just the current point —
+  // means a fast drag can't skip pins between pointermove samples.
+  const eraseAcross = (fromX: number, toX: number): void => {
+    const lo = Math.min(fromX, toX) - ERASE_HIT_PX
+    const hi = Math.max(fromX, toX) + ERASE_HIT_PX
+    for (const kf of keyframes) {
+      const displayT = audioToDisplay(kf.time, speedMap, midiOffsetSec)
+      if (displayT < clampedScroll || displayT > visEnd) continue
+      const x = (displayT - clampedScroll) * pxPerSec
+      if (x >= lo && x <= hi) useStore.getState().removeKeyframe(kf.time)
+    }
+  }
+
+  // Lane pointerdown: right button → start an eraser sweep; left
+  // button on empty space → add a pin at the clicked time. The diamond
+  // markers stopPropagation their own LEFT pointerdown (so left-clicks
+  // that hit a marker select/drag instead of creating), but let RIGHT
+  // pointerdown bubble here so a right-press anywhere starts the
+  // eraser. `addKeyframe` captures the resolved look at that time and
+  // selects the new pin (one undo); seeking makes the viewport /
+  // Inspector jump to it, matching the click-a-pin behaviour.
+  const onLanePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragRef.current) return
+    if (e.button === 2) {
+      e.preventDefault()
+      e.stopPropagation()
+      const x = localXFromEvent(e)
+      if (x === null) return
+      e.currentTarget.setPointerCapture(e.pointerId)
+      useStore.getState().beginSettingsEdit()
+      eraseRef.current = { lastX: x }
+      setErasing(true)
+      eraseAcross(x, x)
+      return
+    }
+    if (e.button !== 0) return
+    const x = localXFromEvent(e)
+    if (x === null) return
+    const displayT = Math.max(0, clampedScroll + x / pxPerSec)
+    const cappedDisplay =
+      totalDuration > 0 ? Math.min(totalDuration, displayT) : displayT
+    const audioT = Math.max(
+      0,
+      displayToAudio(cappedDisplay, speedMap, midiOffsetSec),
+    )
+    useStore.getState().addKeyframe(audioT)
+    seekAudio(audioT)
+  }
+  const onLanePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const er = eraseRef.current
+    if (!er) return
+    // Missed pointerup (capture can drop it when released off-element).
+    if ((e.buttons & 2) === 0) {
+      onLanePointerUp(e)
+      return
+    }
+    e.stopPropagation()
+    const x = localXFromEvent(e)
+    if (x === null) return
+    eraseAcross(er.lastX, x)
+    er.lastX = x
+  }
+  const onLanePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!eraseRef.current) return
+    e.stopPropagation()
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {
+      /* capture may already be released — ignore */
+    }
+    eraseRef.current = null
+    setErasing(false)
+    useStore.getState().endSettingsEdit()
+  }
+  // Right-click is "delete" on this lane — never surface the browser
+  // context menu (same stance as the canvas note editor).
+  const onLaneContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault()
+  }
+
+  return (
+    <div
+      ref={wrapRef}
+      onPointerDown={onLanePointerDown}
+      onPointerMove={onLanePointerMove}
+      onPointerUp={onLanePointerUp}
+      onPointerCancel={onLanePointerUp}
+      onContextMenu={onLaneContextMenu}
+      style={{
+        height: laneHeight,
+        touchAction: 'none',
+        // While erasing, force the not-allowed cursor across the whole
+        // strip (markers inherit it — see below); otherwise the
+        // crosshair class drives "click empty space to add a pin",
+        // mirroring the note editor's empty-area crosshair.
+        cursor: erasing ? 'not-allowed' : undefined,
+      }}
+      className="relative cursor-crosshair overflow-hidden rounded bg-neutral-900/40"
+      aria-label={t('pin.laneAria')}
+      title={t('pin.laneTitle')}
+    >
+      {keyframes.map((kf, i) => {
+        const displayT = audioToDisplay(kf.time, speedMap, midiOffsetSec)
+        if (displayT < clampedScroll || displayT > visEnd) return null
+        const x = (displayT - clampedScroll) * pxPerSec
+        const selected =
+          editingTime !== null && Math.abs(editingTime - kf.time) < 1e-6
+        return (
+          <div
+            key={i}
+            onPointerDown={onPinPointerDown(i)}
+            onPointerMove={onPinPointerMove}
+            onPointerUp={onPinPointerUp}
+            onPointerCancel={onPinPointerUp}
+            title={t('pin.markerTitle', { time: fmtTime(kf.time) })}
+            className={
+              // Note-editor parity: a pin behaves like a note body, so
+              // hover/drag shows the four-way `move` cursor. While an
+              // eraser sweep is active, inherit the lane's not-allowed
+              // cursor instead so the destructive mode reads clearly
+              // even as the pointer passes over markers.
+              erasing
+                ? 'absolute top-1/2 -translate-x-1/2 -translate-y-1/2 cursor-[inherit]'
+                : 'absolute top-1/2 -translate-x-1/2 -translate-y-1/2 cursor-move'
+            }
+            style={{ left: x, width: 12, height: 12, touchAction: 'none' }}
+          >
+            {/* Diamond marker — a rotated square. Sky-toned to match
+                the rest of the timeline chrome; the DIAMOND shape (vs
+                the speed lane's round dots) is what distinguishes it.
+                The targeted pin brightens toward white, mirroring the
+                speed lane's selected-breakpoint treatment. */}
+            <div
+              className={
+                selected
+                  ? 'h-[9px] w-[9px] -translate-x-1/2 -translate-y-1/2 rotate-45 rounded-[1px] bg-white ring-2 ring-sky-300/40'
+                  : 'h-[9px] w-[9px] -translate-x-1/2 -translate-y-1/2 rotate-45 rounded-[1px] bg-sky-300/80 ring-1 ring-sky-300/20 hover:bg-white'
+              }
+              style={{ position: 'absolute', left: '50%', top: '50%' }}
+            />
+          </div>
+        )
+      })}
+      {/* Static label so the strip is identifiable when empty.
+          Click-through so it never blocks a marker. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 font-mono text-[9px] text-neutral-500"
+      >
+        {t('lane.pinsLabel')}
+      </div>
+    </div>
+  )
+}
