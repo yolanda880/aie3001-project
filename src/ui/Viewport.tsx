@@ -9,6 +9,7 @@ import {
 } from "react-aria-components";
 import { UNSAFE_PortalProvider, useHover } from "react-aria";
 import { Scene } from "../scene/Scene";
+import { JudgementFeedback } from "./JudgementFeedback";
 import { SeekBar } from "./SeekBar";
 import {
   CloseIcon,
@@ -633,6 +634,7 @@ export function Viewport() {
         {...hoverProps}
       >
         <Scene />
+        <JudgementFeedback />
         {/* Click-eater while the sampler is loading. Sits between
             the Scene canvas and the SeekBar gradient, so canvas
             interactions are blocked but SeekBar / NoteContextMenu /

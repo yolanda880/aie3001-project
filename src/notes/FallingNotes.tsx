@@ -1,7 +1,7 @@
 import { useMemo, useRef, useEffect } from 'react'
 import * as THREE from 'three'
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
-import { useStore, useSettingsSlice, defaultSettings } from '../store'
+import { useStore, useSettingsSlice } from '../store'
 import { computeLiveVisibleTop } from '../scene/visibleTop'
 import { getResolvedSettings } from '../scene/automatedSettings'
 import { audioEngine } from '../audio/engine'
@@ -14,6 +14,7 @@ import {
   clickXToMidi,
   clickYToTime,
   fallDistance,
+  FALL_REFERENCE_DISTANCE,
   noteVisualBounds,
   parallaxX,
   NOTE_PLANE_Z,
@@ -22,6 +23,8 @@ import {
 } from './positions'
 import { buildSpeedMap, midiToTimeline } from '../midi/speedMap'
 import { noteDeathFx, FADE_DURATION as DEATH_FADE_DURATION } from './noteDeathFx'
+import { visualTiming } from './visualTiming'
+import { TIMING_FEEDBACK } from '../midi/timingFeedback'
 
 const MAX_INSTANCES = 4096
 // Texture-phase wrap period (see the wrap in the useFrame). A power of
@@ -42,14 +45,6 @@ const SPAWN_BUFFER = 1.0
 // the user orbits / zooms / pans. Without this, the per-frame layout
 // would re-derive FALL_DISTANCE from the live camera and notes would
 // stretch / shrink as the camera moved.
-const FALL_REFERENCE_DISTANCE =
-  Math.max(
-    0.5,
-    defaultSettings.cameraLookAt[1] +
-      Math.abs(defaultSettings.cameraPos[2]) *
-        Math.tan((defaultSettings.cameraFov * Math.PI) / 360) -
-      noteHitYWorld(defaultSettings.keyboardY),
-  ) + SPAWN_BUFFER
 
 // Shared in/out object for `computeRisingRect`. Reused across notes so
 // the per-frame layout pass doesn't allocate thousands of objects.
@@ -847,13 +842,11 @@ export function FallingNotes({ liveOnly = false }: { liveOnly?: boolean }) {
         // the visual descent stays at `FALL_DISTANCE / fall` per
         // wall-second regardless of the speed curve.
         const headT = headFire - tl
-        const tailT = tailFire - tl
         if (headT > downSpawnCutoff) break // sorted by time → no later notes are visible yet
         const headY = hitY + (headT / fall) * FALL_DISTANCE
-        const tailY = hitY + (tailT / fall) * FALL_DISTANCE
-        const visualLength = Math.max(minLength, tailY - headY)
+        const timing = visualTiming(headFire, tailFire, minLength, fall, FALL_DISTANCE)
         bottomY = headY
-        topY = bottomY + visualLength
+        topY = hitY + ((timing.disappear - tl) / fall) * FALL_DISTANCE
         // Skip once the entire visual rect is at or below the hit line.
         if (topY <= hitY) continue
       } else {
@@ -958,10 +951,17 @@ export function FallingNotes({ liveOnly = false }: { liveOnly?: boolean }) {
         selectedAttrData[count] = 0
         alphaAttrData[count] = 1
         noteIds[count] = -1
-        // Live notes have no track — fall back to noteColor.
-        tints[count * 3] = defaultR
-        tints[count * 3 + 1] = defaultG
-        tints[count * 3 + 2] = defaultB
+        // Latch feedback per live note so release / the next press cannot recolor its trail.
+        if (ln.judgement) {
+          tmpColor.set(TIMING_FEEDBACK.colors[ln.judgement])
+          tints[count * 3] = tmpColor.r
+          tints[count * 3 + 1] = tmpColor.g
+          tints[count * 3 + 2] = tmpColor.b
+        } else {
+          tints[count * 3] = defaultR
+          tints[count * 3 + 1] = defaultG
+          tints[count * 3 + 2] = defaultB
+        }
 
         count++
         if (count >= MAX_INSTANCES) break

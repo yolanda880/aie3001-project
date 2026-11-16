@@ -2,11 +2,13 @@ import type { NoteEvent } from '../midi/types'
 import type { Settings } from '../store'
 import { midiToTimeline, type SpeedMap } from '../midi/speedMap'
 import { KEY_COUNT, MIDI_MIN } from '../keyboard/layout'
+import { FALL_REFERENCE_DISTANCE } from './positions'
+import { visualTiming } from './visualTiming'
 
 export type KeyFill = { progress: number; track: number | undefined }
 
 type FillSettings = Pick<Settings,
-  'notesEnabled' | 'fallDurationSec' | 'midiOffsetSec' | 'transpose' |
+  'notesEnabled' | 'fallDurationSec' | 'noteMinLength' | 'midiOffsetSec' | 'transpose' |
   'midiTrimStartSec' | 'midiTrimEndSec'>
 
 /** Update a reusable per-key buffer from the same audio timeline as playback. */
@@ -27,7 +29,8 @@ export function updateKeyFills(
     const end = settings.midiOffsetSec + midiToTimeline(
       speedMap, Math.min(note.time + note.duration, trimEnd),
     )
-    if (time >= end || end <= fire) continue
+    const timing = visualTiming(fire, end, settings.noteMinLength, lead, FALL_REFERENCE_DISTANCE)
+    if (time >= timing.disappear) continue
     const fill = fills[index]
     // The earliest unfinished note owns the key; later repeats cannot fill it early.
     if (fill.progress > 0) continue

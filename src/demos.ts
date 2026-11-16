@@ -1,5 +1,5 @@
 /**
- * Bundled demo projects. Drop `.nfz` files into `src/demos/` and they
+ * Bundled user demo projects. Drop `notefall-*.nfz` files into `src/demos/` and they
  * appear in the Toolbar's "Demo Songs" menu automatically — Vite's
  * `import.meta.glob(?url)` resolves each file to a hashed asset URL at
  * build time, so demos ship as static assets alongside the app.
@@ -14,7 +14,7 @@
 
 import { strFromU8, unzipSync } from 'fflate'
 
-const modules = import.meta.glob('./demos/*.nfz', {
+const modules = import.meta.glob('./demos/notefall-*.nfz', {
   eager: true,
   query: '?url',
   import: 'default',

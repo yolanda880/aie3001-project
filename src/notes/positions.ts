@@ -87,6 +87,9 @@ export function fallDistance(settings: Settings): number {
   return Math.max(0.5, frustumTop(settings) - hitY) + SPAWN_BUFFER
 }
 
+// Frozen to the original default geometry, independent of the locked view.
+export const FALL_REFERENCE_DISTANCE = fallDistance(defaultSettings)
+
 /**
  * World Y of a click → MIDI-time the click corresponds to, accounting
  * for fall direction. Used by "double-click empty space to add a

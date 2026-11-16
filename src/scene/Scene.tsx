@@ -40,7 +40,7 @@ import { HitLine } from '../notes/HitLine'
 import { WHITE_KEY_LENGTH, KEYBOARD_LAYOUT } from '../keyboard/layout'
 import { audioEngine } from '../audio/engine'
 import { pauseSong, playSong, togglePlayback } from '../audio/playback'
-import { CameraControls, isCameraGestureActive } from './CameraControls'
+import { isCameraGestureActive } from './CameraControls'
 import { StageBackground } from './StageBackgroundLayer'
 
 // On-screen preview tick rate when the user opts into the lighter
@@ -187,7 +187,6 @@ function SceneContents() {
       <ambientLight intensity={0.35} />
       <directionalLight position={[2, 6, 4]} intensity={0.8} />
       <CameraSync pos={s.cameraPos} lookAt={s.cameraLookAt} fov={s.cameraFov} />
-      <CameraControls />
       <R3FStateBridge />
       <PlayToggleArea />
       <Keyboard />
@@ -527,7 +526,23 @@ function CameraSync({
   lookAt: [number, number, number]
   fov: number
 }) {
-  const { camera } = useThree()
+  const { camera, gl } = useThree()
+  useEffect(() => {
+    // Keep browser Ctrl+wheel zoom / middle-button autoscroll from changing
+    // the aligned canvas when the user attempts the former camera gestures.
+    const wheel = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) event.preventDefault()
+    }
+    const middle = (event: PointerEvent) => {
+      if (event.button === 1) event.preventDefault()
+    }
+    gl.domElement.addEventListener('wheel', wheel, { passive: false })
+    gl.domElement.addEventListener('pointerdown', middle)
+    return () => {
+      gl.domElement.removeEventListener('wheel', wheel)
+      gl.domElement.removeEventListener('pointerdown', middle)
+    }
+  }, [gl])
   // Non-pin (or zero-pin) path: apply on prop change so a slider drag
   // updates the camera immediately even while paused. With pins this
   // sets the base framing; the per-frame block below then overrides

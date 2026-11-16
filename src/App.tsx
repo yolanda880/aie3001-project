@@ -6,6 +6,9 @@ import { PageLoader } from './ui/PageLoader'
 import { initAnalytics, track } from './usage'
 import { hasFileSystemAccess } from './projects/io'
 import { isVideoExportSupported } from './export/renderVideo'
+import { installLiveJudgement } from './midi/liveJudgement'
+import { installKeyboardViewLock } from './scene/fixedKeyboardView'
+import { useSampleSong } from './midi/useSampleSong'
 
 // Below this width the full UI (viewport + inspector + transport overlay)
 // does not fit, so a fallback is shown. Matches Tailwind's `lg` breakpoint.
@@ -40,6 +43,9 @@ function detectWebGLAvailable(): boolean {
 }
 
 export function App() {
+  useEffect(installKeyboardViewLock, [])
+  useEffect(installLiveJudgement, [])
+  useSampleSong()
   const [supported, setSupported] = useState(
     typeof window !== 'undefined' ? window.innerWidth >= MIN_WIDTH_PX : true,
   )

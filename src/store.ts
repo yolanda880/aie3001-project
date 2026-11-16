@@ -229,7 +229,7 @@ export type Settings = {
   // the effective sampler level. Lets the user duck the synthesised
   // piano against an imported accompaniment without touching master.
   midiVolume: number
-  // When false, the MIDI sampler is silenced (effective gain = 0)
+  // When false, MIDI file playback is silenced while live MIDI notes remain audible.
   // while the timeline + falling notes + key glow continue to play.
   // Auto-flipped to false on a user-gesture audio import so the
   // visualization can sync against the user's own recording without

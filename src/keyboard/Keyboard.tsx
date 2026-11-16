@@ -438,10 +438,11 @@ export function Keyboard() {
     updateKeyFills(song?.notes ?? [], audioEngine.currentSongTime(), rs, speedMap, fills);
     for (let i = 0; i < KEY_COUNT; i++) {
       const u = fillUniforms[i];
-      u.uKeyFill.value = fills[i].progress;
-      u.uKeyFillColor.value.set(resolveTrackColorHex(fills[i].track, rs.trackColors, rs.noteColor));
-      u.uKeyFillOpacity.value = rs.noteOpacity;
-      u.uKeyFillEmissive.value = rs.noteEmissive;
+      const feedbackColor = audioEngine.getLiveTimingColor(MIDI_MIN + i);
+      u.uKeyFill.value = feedbackColor ? 1 : fills[i].progress;
+      u.uKeyFillColor.value.set(feedbackColor ?? resolveTrackColorHex(fills[i].track, rs.trackColors, rs.noteColor));
+      u.uKeyFillOpacity.value = feedbackColor ? 0.9 : rs.noteOpacity;
+      u.uKeyFillEmissive.value = feedbackColor ? 0.2 : rs.noteEmissive;
     }
     const brightness = rs.keyboardBrightness;
     const pressK = 1 - Math.exp(-delta / Math.max(0.005, PRESS_TC));

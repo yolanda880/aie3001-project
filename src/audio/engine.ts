@@ -21,6 +21,7 @@ import {
   type VelocityCurve,
 } from './velocityCurve'
 import { DEFAULT_VELOCITY_COMPENSATION } from './salamanderDescriptor'
+import { elapsedPlaybackSeconds, TIMING_FEEDBACK, type Judgement } from '../midi/timingFeedback'
 
 type ActiveNote = {
   id: number
@@ -66,6 +67,7 @@ export type LiveNote = {
   velocity: number
   startTime: number // clock.now() at trigger
   endTime: number | null // null while still held
+  judgement?: Judgement
 }
 
 export type KeyEventListener = (
@@ -103,7 +105,39 @@ export type LiveInputListener = (
  * also calls tick() to push due events to the sampler.
  */
 export class AudioEngine {
+  private liveJudge: ((midi: number) => Judgement | undefined) | null = null
+  private judgementRevision = 0
+  private judgementStartTime = 0
+  private judgementRates = [{ at: -Infinity, rate: 1 }]
+
+  setLiveJudge(judge: ((midi: number) => Judgement | undefined) | null): void {
+    this.liveJudge = judge
+  }
+
+  getJudgementRevision(): number { return this.judgementRevision }
+  getJudgementStartTime(): number { return this.judgementStartTime }
+
+  elapsedPlaybackSeconds(from: number, to: number): number {
+    return elapsedPlaybackSeconds(from, to, this.judgementRates)
+  }
+
+  private resetJudgementSession(startTime = 0): void {
+    this.judgementRevision++
+    this.judgementStartTime = startTime
+    this.judgementRates = [{ at: -Infinity, rate: this.rate }]
+  }
+
+  getLiveTimingColor(midi: number): string | undefined {
+    for (let i = this.liveNotes.length - 1; i >= 0; i--) {
+      const note = this.liveNotes[i]
+      if (note.midi === midi && note.endTime === null) {
+        return note.judgement ? TIMING_FEEDBACK.colors[note.judgement] : undefined
+      }
+    }
+    return undefined
+  }
   private piano: PianoInstrument | null = null
+  private demoPiano: PianoInstrument | null = null
   private song: ParsedSong | null = null
 
   private playing = false
@@ -114,8 +148,7 @@ export class AudioEngine {
   private pedalEnabled = true
   // Master gain — multiplies both sampler and user-audio output.
   private masterVolume = 0.5
-  // MIDI sampler-only gain. Applied as `master × midi × (enabled?1:0)`
-  // before reaching `piano.setVolume`.
+  // Both samplers share this level. midiEnabled gates only demoPiano.
   private midiVolume = 1.0
   private midiEnabled = true
   private loop = false
@@ -228,25 +261,28 @@ export class AudioEngine {
   private speedMap: SpeedMap = EMPTY_SPEED_MAP
 
   async init(onProgress?: (p: LoadProgress) => void): Promise<void> {
-    if (this.piano) return
+    if (this.piano && this.demoPiano) return
     if (this.initPromise) return this.initPromise
     this.initPromise = (async () => {
       try {
-        this.piano = await createPiano(undefined, onProgress)
-        this.piano.setVolume(this.effectiveSamplerVolume())
-        this.piano.setReverbSize(this.reverbSize)
-        this.piano.setReverbDecayTime(this.reverbDecayTime)
-        this.piano.setReverbDecay(this.reverbDecay)
-        this.piano.setReverbPreDelay(this.reverbPreDelay)
-        this.piano.setReverbDamping(this.reverbDamping)
-        this.piano.setReverbHiCut(this.reverbHiCut)
-        this.piano.setReverbLowCut(this.reverbLowCut)
-        this.piano.setReverbDry(this.reverbDry)
-        this.piano.setReverbWet(this.effectiveWet())
-        this.piano.setReleaseTime(this.releaseTime)
-        this.piano.setDetune(this.detuneCents)
-        this.piano.setVelocityCompensation(this.velocityCompensation)
-        this.eqBandsDb.forEach((db, i) => this.piano!.setEqBand(i, db))
+        this.piano ??= await createPiano(undefined, onProgress)
+        this.demoPiano ??= await createPiano()
+        for (const instrument of [this.piano, this.demoPiano]) {
+          instrument.setReverbSize(this.reverbSize)
+          instrument.setReverbDecayTime(this.reverbDecayTime)
+          instrument.setReverbDecay(this.reverbDecay)
+          instrument.setReverbPreDelay(this.reverbPreDelay)
+          instrument.setReverbDamping(this.reverbDamping)
+          instrument.setReverbHiCut(this.reverbHiCut)
+          instrument.setReverbLowCut(this.reverbLowCut)
+          instrument.setReverbDry(this.reverbDry)
+          instrument.setReverbWet(this.effectiveWet())
+          instrument.setReleaseTime(this.releaseTime)
+          instrument.setDetune(this.detuneCents)
+          instrument.setVelocityCompensation(this.velocityCompensation)
+          this.eqBandsDb.forEach((db, i) => instrument.setEqBand(i, db))
+        }
+        this.applyVolumes()
       } finally {
         this.initPromise = null
       }
@@ -255,7 +291,7 @@ export class AudioEngine {
   }
 
   isReady(): boolean {
-    return this.piano !== null
+    return this.piano !== null && this.demoPiano !== null
   }
 
   /**
@@ -275,7 +311,7 @@ export class AudioEngine {
   }
 
   /**
-   * Mute / unmute the MIDI sampler without touching its volume value
+   * Mute / unmute MIDI file playback without touching live input.
    * — toggling back keeps the previously-set midi gain intact. The
    * visual layer (falling notes, key glow, particles) continues to
    * fire either way; only the sampler audio is gated.
@@ -286,7 +322,7 @@ export class AudioEngine {
   }
 
   private effectiveSamplerVolume(): number {
-    return this.midiEnabled ? this.masterVolume * this.midiVolume : 0
+    return this.masterVolume * this.midiVolume
   }
 
   /**
@@ -296,6 +332,7 @@ export class AudioEngine {
    */
   private applyVolumes(): void {
     this.piano?.setVolume(this.effectiveSamplerVolume())
+    this.demoPiano?.setVolume(this.midiEnabled ? this.effectiveSamplerVolume() : 0)
     if (this.userAudioGain) {
       const ctx = this.userAudioGain.context
       const target = this.masterVolume * this.userAudioVolume
@@ -306,16 +343,19 @@ export class AudioEngine {
   setReverbEnabled(enabled: boolean): void {
     this.reverbEnabled = enabled
     this.piano?.setReverbWet(this.effectiveWet())
+    this.demoPiano?.setReverbWet(this.effectiveWet())
   }
 
   setReverbDry(level: number): void {
     this.reverbDry = level
     this.piano?.setReverbDry(level)
+    this.demoPiano?.setReverbDry(level)
   }
 
   setReverbWet(level: number): void {
     this.reverbWet = level
     this.piano?.setReverbWet(this.effectiveWet())
+    this.demoPiano?.setReverbWet(this.effectiveWet())
   }
 
   private effectiveWet(): number {
@@ -325,52 +365,62 @@ export class AudioEngine {
   setReverbSize(seconds: number): void {
     this.reverbSize = seconds
     this.piano?.setReverbSize(seconds)
+    this.demoPiano?.setReverbSize(seconds)
   }
 
   setReverbDecayTime(seconds: number): void {
     this.reverbDecayTime = seconds
     this.piano?.setReverbDecayTime(seconds)
+    this.demoPiano?.setReverbDecayTime(seconds)
   }
 
   setReverbDecay(decay: number): void {
     this.reverbDecay = decay
     this.piano?.setReverbDecay(decay)
+    this.demoPiano?.setReverbDecay(decay)
   }
 
   setReverbPreDelay(seconds: number): void {
     this.reverbPreDelay = seconds
     this.piano?.setReverbPreDelay(seconds)
+    this.demoPiano?.setReverbPreDelay(seconds)
   }
 
   setReverbDamping(amount: number): void {
     this.reverbDamping = amount
     this.piano?.setReverbDamping(amount)
+    this.demoPiano?.setReverbDamping(amount)
   }
 
   setReverbHiCut(hz: number): void {
     this.reverbHiCut = hz
     this.piano?.setReverbHiCut(hz)
+    this.demoPiano?.setReverbHiCut(hz)
   }
 
   setReverbLowCut(hz: number): void {
     this.reverbLowCut = hz
     this.piano?.setReverbLowCut(hz)
+    this.demoPiano?.setReverbLowCut(hz)
   }
 
   setReleaseTime(seconds: number): void {
     this.releaseTime = seconds
     this.piano?.setReleaseTime(seconds)
+    this.demoPiano?.setReleaseTime(seconds)
   }
 
   setDetune(cents: number): void {
     this.detuneCents = cents
     this.piano?.setDetune(cents)
+    this.demoPiano?.setDetune(cents)
   }
 
   setEqBand(index: number, db: number): void {
     if (index < 0 || index >= this.eqBandsDb.length) return
     this.eqBandsDb[index] = db
     this.piano?.setEqBand(index, db)
+    this.demoPiano?.setEqBand(index, db)
   }
 
   setVelocityCurve(curve: VelocityCurve): void {
@@ -379,6 +429,7 @@ export class AudioEngine {
   setVelocityCompensation(c: number): void {
     this.velocityCompensation = Math.max(0, Math.min(1, c))
     this.piano?.setVelocityCompensation(this.velocityCompensation)
+    this.demoPiano?.setVelocityCompensation(this.velocityCompensation)
   }
   setTranspose(semitones: number): void {
     this.transpose = Math.round(semitones)
@@ -400,6 +451,8 @@ export class AudioEngine {
   setRate(rate: number): void {
     const t = this.currentSongTime()
     this.rate = Math.max(0.25, Math.min(4, rate))
+    this.judgementRates = this.judgementRates.filter(segment => segment.at < t)
+    this.judgementRates.push({ at: t, rate: this.rate })
     this.startedAt = now()
     this.offsetAtStart = t
     // Rate change must rebuild the user-audio source — `playbackRate` is
@@ -626,6 +679,7 @@ export class AudioEngine {
   }
 
   loadSong(song: ParsedSong): void {
+    this.resetJudgementSession()
     this.releaseAll()
     this.stopUserAudioSource()
     this.song = song
@@ -653,6 +707,7 @@ export class AudioEngine {
    * exactly as it would have if the user hadn't edited at all.
    */
   updateSong(song: ParsedSong): void {
+    this.resetJudgementSession(this.currentSongTime())
     const t = this.currentSongTime()
     const newById = new Map<number, ParsedSong['notes'][number]>()
     for (const n of song.notes) newById.set(n.id, n)
@@ -681,6 +736,7 @@ export class AudioEngine {
    * implicit backing track.
    */
   unloadSong(): void {
+    this.resetJudgementSession()
     this.releaseAll()
     this.stopUserAudioSource()
     this.song = null
@@ -720,6 +776,7 @@ export class AudioEngine {
   }
 
   stop(): void {
+    this.resetJudgementSession()
     this.playing = false
     this.offsetAtStart = 0
     this.noteIdx = 0
@@ -731,6 +788,7 @@ export class AudioEngine {
   }
 
   seek(tlAudio: number): void {
+    this.resetJudgementSession()
     const wasPlaying = this.playing
     // `tlAudio` is the engine's INTERNAL time axis (wall-clock × rate
     // since playback start). Aligned with the AudioContext schedule
@@ -742,6 +800,7 @@ export class AudioEngine {
     const midiEndTimeline = midiToTimeline(this.speedMap, songDur)
     const dur = midiEndTimeline + this.midiOffsetSec
     const clamped = Math.max(0, Math.min(dur, tlAudio))
+    this.judgementStartTime = clamped
     const midiClamped = timelineToMidi(
       this.speedMap,
       clamped - this.midiOffsetSec,
@@ -816,7 +875,7 @@ export class AudioEngine {
         const playedMidi = n.midi + this.transpose
         if (playedMidi < 0 || playedMidi > 127) continue
         const shaped = this.shapeVelocity(n.velocity)
-        const stopFn = this.piano.start(playedMidi, shaped, audioBase, `s${n.id}`)
+        const stopFn = this.demoPiano!.start(playedMidi, shaped, audioBase, `s${n.id}`)
         const endTime = Math.min(n.time + n.duration, seekTrimEnd)
         this.active.set(n.id, { id: n.id, midi: playedMidi, endTime, stop: stopFn })
         this.emit({ type: 'on', midi: playedMidi, velocity: shaped, songTime: clamped, track: n.track })
@@ -913,7 +972,8 @@ export class AudioEngine {
     const shaped = this.shapeVelocity(velocity)
     const stopFn = this.piano.start(midi, shaped, undefined, `live${id}`)
     const startTime = now()
-    const note: LiveNote = { id, midi, velocity: shaped, startTime, endTime: null }
+    const note: LiveNote = { id, midi, velocity: shaped, startTime, endTime: null,
+      judgement: this.liveJudge?.(midi) }
     this.liveNotes.push(note)
     this.liveStops.set(id, stopFn)
     this.emit({ type: 'on', midi, velocity, songTime: this.currentSongTime() })
@@ -1039,6 +1099,7 @@ export class AudioEngine {
 
   private releaseAll(): void {
     this.piano?.stopAll()
+    this.demoPiano?.stopAll()
     const t = this.currentSongTime()
     for (const a of this.active.values()) {
       this.emit({ type: 'off', midi: a.midi, songTime: t })
@@ -1061,6 +1122,7 @@ export class AudioEngine {
 
   private releaseAllSounding(): void {
     this.piano?.stopAll()
+    this.demoPiano?.stopAll()
   }
 
   /** Walks the song's note + pedal arrays to bring the scheduling
@@ -1173,7 +1235,7 @@ export class AudioEngine {
       const stopFn =
         this.silent || !this.piano
           ? noopStop
-          : this.piano.start(playedMidi, shaped, audioBase + offset, `s${n.id}`)
+          : this.demoPiano!.start(playedMidi, shaped, audioBase + offset, `s${n.id}`)
       // Clamp note-off to the trim end so a note that originally
       // extended past the tail trim gets cut at the trim boundary
       // instead of sustaining indefinitely.

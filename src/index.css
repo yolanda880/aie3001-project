@@ -39,3 +39,20 @@ html, body {
 .scroll-thin::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+.rhythm-judgement {
+  font-size: clamp(24px, 2.8vw, 42px);
+  font-weight: 900;
+  line-height: 1.15;
+  letter-spacing: 0.04em;
+  text-shadow: 0 2px 5px #000, 0 0 18px currentColor;
+  animation: rhythm-judgement-pop 850ms ease-out both;
+}
+@keyframes rhythm-judgement-pop {
+  0% { opacity: 1; transform: scale(1.15); }
+  16%, 65% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: translateY(-8px) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rhythm-judgement { animation: none; }
+}

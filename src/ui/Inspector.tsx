@@ -664,14 +664,18 @@ export function Inspector() {
       <SearchProvider query={query}>
       <div className="scroll-thin flex-1 overflow-y-auto px-3 pb-6">
         <Section title={t('section.camera')}>
-          <CameraSection />
+          <fieldset disabled aria-label="已锁定的键盘视角" className="pointer-events-none opacity-70">
+            <CameraSection />
+          </fieldset>
           <p className="px-2 pt-1 pb-2 text-[10px] leading-snug text-neutral-500">
-            {t('camera.hint')}
+            视角已锁定，保持当前缩放与琴键范围。中键拖动和缩放已禁用。
           </p>
         </Section>
 
         <Section title={t('section.layout')}>
-          <BoundSliderRow label={t('row.keyboardY')} settingKey="keyboardY" min={-3} max={2} step={0.05} />
+          <fieldset disabled aria-label="已锁定的琴键位置" className="pointer-events-none opacity-70">
+            <BoundSliderRow label={t('row.keyboardY')} settingKey="keyboardY" min={-3} max={2} step={0.05} />
+          </fieldset>
         </Section>
 
         <Section title={t('section.theme')}>
@@ -681,7 +685,9 @@ export function Inspector() {
         <Section title={t('section.notes')}>
           <BoundSwitchRow label={t('row.enabled')} settingKey="notesEnabled" />
           <FallDirectionRow />
-          <BoundSliderRow label={t('row.fallTime')} settingKey="fallDurationSec" min={0.5} max={8} step={0.1} />
+          <fieldset disabled className="pointer-events-none opacity-70" title="Fall Time 已固定为 1.3 秒">
+            <BoundSliderRow label={t('row.fallTime')} settingKey="fallDurationSec" min={0.5} max={8} step={0.1} />
+          </fieldset>
           <TrackColorRows />
           <BoundSliderRow label={t('row.emissive')} settingKey="noteEmissive" min={0} max={20} step={0.1} />
           <BoundSliderRow label={t('row.opacity')} settingKey="noteOpacity" min={0} max={1} step={0.01} />
